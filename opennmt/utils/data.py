@@ -17,25 +17,6 @@ def get_padded_shapes(dataset):
   return tf.contrib.framework.nest.map_structure(
       lambda shape: shape.as_list(), dataset.output_shapes)
 
-def filter_irregular_batches(multiple):
-  """Transformation that filters out batches based on their size.
-
-  Args:
-    multiple: The divisor of the batch size.
-
-  Returns:
-    A ``tf.data.Dataset`` transformation.
-  """
-  if multiple == 1:
-    return lambda dataset: dataset
-
-  def _predicate(*x):
-    flat = tf.contrib.framework.nest.flatten(x)
-    batch_size = tf.shape(flat[0])[0]
-    return tf.equal(tf.mod(batch_size, multiple), 0)
-
-  return lambda dataset: dataset.filter(_predicate)
-
 def filter_examples_by_length(maximum_features_length=None,
                               maximum_labels_length=None,
                               features_length_fn=None,
@@ -121,7 +102,6 @@ def batch_dataset(batch_size, padded_shapes=None):
 
 def batch_parallel_dataset(batch_size,
                            batch_type="examples",
-                           batch_multiplier=1,
                            bucket_width=None,
                            padded_shapes=None,
                            features_length_fn=None,
@@ -144,8 +124,6 @@ def batch_parallel_dataset(batch_size,
     batch_size: The batch size.
     batch_type: The training batching strategy to use: can be "examples" or
       "tokens".
-    batch_multiplier: The batch size multiplier to prepare splitting accross
-      replicated graph parts.
     bucket_width: The sequence length bucket width.
     padded_shapes: The padded shapes for this dataset. If ``None``, the shapes
       are automatically inferred from the dataset output shapes.
@@ -158,7 +136,6 @@ def batch_parallel_dataset(batch_size,
   Raises:
     ValueError: if :obj:`batch_type` is not one of "examples" or "tokens".
   """
-  batch_size = batch_size * batch_multiplier
 
   def _key_func(features, labels):
     features_length = features_length_fn(features) if features_length_fn is not None else None
@@ -180,10 +157,7 @@ def batch_parallel_dataset(batch_size,
     if bucket_width > 1:
       key += 1  # For bucket_width == 1, key 0 is unassigned.
     size = batch_size // (key * bucket_width)
-    if batch_multiplier > 1:
-      # Make the window size a multiple of batch_multiplier.
-      size = size + batch_multiplier - size % batch_multiplier
-    return tf.cast(tf.maximum(size, batch_multiplier), tf.int64)
+    return tf.cast(tf.maximum(size, 1), tf.int64)
 
   if bucket_width is None:
     return batch_dataset(batch_size, padded_shapes=padded_shapes)
@@ -202,7 +176,6 @@ def batch_parallel_dataset(batch_size,
 def training_pipeline(dataset,
                       batch_size,
                       batch_type="examples",
-                      batch_multiplier=1,
                       bucket_width=None,
                       single_pass=False,
                       process_fn=None,
@@ -220,8 +193,6 @@ def training_pipeline(dataset,
     batch_size: The batch size to use.
     batch_type: The training batching stragety to use: can be "examples" or
       "tokens".
-    batch_multiplier: The batch size multiplier to prepare splitting accross
-       replicated graph parts.
     bucket_width: The width of the length buckets to select batch candidates
       from. ``None`` to not constrain batch formation.
     single_pass: If ``True``, makes a single pass over the training data.
@@ -261,11 +232,9 @@ def training_pipeline(dataset,
   dataset = dataset.apply(batch_parallel_dataset(
       batch_size,
       batch_type=batch_type,
-      batch_multiplier=batch_multiplier,
       bucket_width=bucket_width,
       features_length_fn=features_length_fn,
       labels_length_fn=labels_length_fn))
-  dataset = dataset.apply(filter_irregular_batches(batch_multiplier))
   if not single_pass:
     dataset = dataset.repeat()
   dataset = dataset.prefetch(None)
