@@ -5,6 +5,134 @@ import collections
 import tensorflow as tf
 
 
+class _RNNCellWrapper(tf.keras.layers.Wrapper):
+  """Helper class to wrap a RNN cell."""
+
+  @property
+  def state_size(self):
+    """The cell state size."""
+    return self.layer.state_size
+
+  @property
+  def output_size(self):
+    """The cell output size."""
+    return self.layer.output_size
+
+  def build(self, input_shape):
+    """Build the cell."""
+    self.layer.build(input_shape)
+    self.built = True
+
+  def call(self, inputs, states, training=None):
+    """Calls the cell."""
+    return self.layer.call(inputs, states, training=training)
+
+  def get_initial_state(self, inputs=None, batch_size=None, dtype=None):
+    """Returns the cell initial state."""
+    return self.layer.get_initial_state(
+        inputs=inputs, batch_size=batch_size, dtype=dtype)
+
+
+class ResidualWrapper(_RNNCellWrapper):
+  """Adds residual connection to a RNN cell."""
+
+  def call(self, inputs, states, training=None):
+    outputs, states = super(ResidualWrapper, self).call(
+        inputs, states, training=training)
+    return outputs + inputs, states
+
+
+class DropoutWrapper(_RNNCellWrapper):
+  """Applies dropout to the input and output of a RNN cell."""
+
+  def __init__(self, layer, input_rate=0.0, output_rate=0.0, **kwargs):
+    super(DropoutWrapper, self).__init__(layer, **kwargs)
+    self.input_rate = input_rate
+    self.output_rate = output_rate
+
+  def call(self, inputs, states, training=None):
+    if training and self.input_rate > 0:
+      inputs = tf.nn.dropout(inputs, rate=self.input_rate)
+    outputs, states = super(DropoutWrapper, self).call(
+        inputs, states, training=training)
+    if training and self.output_rate > 0:
+      outputs = tf.nn.dropout(outputs, rate=self.output_rate)
+    return outputs, states
+
+  def get_config(self):
+    """Returns the config if this cell wrapper."""
+    config = super(DropoutWrapper, self).get_config()
+    config["input_rate"] = self.input_rate
+    config["output_rate"] = self.output_rate
+    return config
+
+
+_CUSTOM_CELLS = {
+    "DropoutWrapper": DropoutWrapper,
+    "ResidualWrapper": ResidualWrapper,
+}
+
+
+def build_keras_cell(num_layers,
+                     num_units,
+                     dropout=0.0,
+                     residual_connections=False,
+                     cell_class=tf.keras.layers.LSTMCell):
+  """Builds a multi-layer Keras RNN cell.
+
+  Args:
+    num_layers: The number of layers.
+    num_units: The number of units in each layer.
+    dropout: The probability to drop units in each layer output.
+    residual_connections: If ``True``, each layer input will be added to its output.
+    cell_class: The inner cell class or a callable taking :obj:`num_units` as
+      argument and returning a cell.
+
+  Returns:
+    A ``tf.keras.layers.Layer`` that acts as a RNN cell.
+  """
+  cells = []
+  for l in range(num_layers):
+    cell = cell_class(num_units)
+    if dropout > 0:
+      cell = DropoutWrapper(cell, output_rate=dropout)
+    if residual_connections and l > 0:
+      cell = ResidualWrapper(cell)
+    cells.append(cell)
+  return tf.keras.layers.StackedRNNCells(cells)
+
+def build_rnn(num_layers,
+              num_units,
+              bidirectional=False,
+              dropout=0.0,
+              residual_connections=False,
+              cell_class=tf.keras.layers.LSTMCell):
+  """Builds a RNN layer.
+
+  Args:
+    num_layers: The number of layers.
+    num_units: The number of units in each layer.
+    bidirectional: If ``True``, build a bidirectional RNN.
+    dropout: The probability to drop units in each layer output.
+    residual_connections: If ``True``, each layer input will be added to its output.
+    cell_class: The inner cell class or a callable taking :obj:`num_units` as
+      argument and returning a cell.
+
+  Returns:
+    A ``tf.keras.layers.Layer``.
+  """
+  cell = build_keras_cell(
+      num_layers,
+      num_units,
+      dropout=dropout,
+      residual_connections=residual_connections,
+      cell_class=cell_class)
+  with tf.keras.utils.custom_object_scope(_CUSTOM_CELLS):
+    layer = tf.keras.layers.RNN(cell, return_sequences=True, return_state=True)
+    if bidirectional:
+      layer = tf.keras.layers.Bidirectional(layer, merge_mode=None)
+  return layer
+
 def build_cell(num_layers,
                num_units,
                dropout=0.0,
